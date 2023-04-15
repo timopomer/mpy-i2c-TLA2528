@@ -1,21 +1,34 @@
 from machine import Pin, I2C
 from time import sleep, sleep_ms
 
-READ_BYTE = 0b00010000
+
 DEBUG_MODE = True
 
 def adc_to_voltage(adc_bytes: bytes, avdd=5.0, n_bits=12):
     # Calculate the voltage per least significant bit (LSB)
     adc_value = int.from_bytes(adc_bytes, 'big')
-    print(bin(adc_value))
     adc_value = adc_value >> 4
-    print(bin(adc_value))
 
     voltage_per_lsb = avdd / (2 ** n_bits)
-    print(voltage_per_lsb)
     # Convert the 2-byte ADC value to voltage
     voltage = adc_value * voltage_per_lsb
     return voltage
+
+def create_bitmask(size: int, offset: int) -> int:
+    mask = ((1 << size) - 1) << offset
+    return mask
+
+def replace_bits(original: int, replacement: int, size: int, offset: int, original_size: int = 8) -> int:
+    if replacement >= (1 << size):
+        raise ValueError(f"Replacement value {replacement} is too large for the specified size {size}")
+
+    if offset + size > original_size:
+        raise ValueError(f"Offset {offset} and size {size} exceed the original size {original_size}")
+
+    original_mask = ~create_bitmask(size, offset)
+    replacement_mask = replacement << offset
+
+    return (original & original_mask) | replacement_mask
 
 def bytes_to_bits(bytes_object: bytes):
     bit_list = []
@@ -98,13 +111,30 @@ class TLA2528OperatingModeConfiguration:
         pass
 
 class TLA2528ManualChannelSelect:
-    def __init__(self, response: bytes) -> None:
-        self._response_byte = response[0]
+    MANUAL_CH_SEL_ADDRESS = 0x11
+    MANUAL_CH_ID_SIZE = 4
+    MANUAL_CH_ID_OFFSET = 0
+    MANUAL_CH_ID_MASK = create_bitmask(MANUAL_CH_ID_SIZE, MANUAL_CH_ID_OFFSET)
+    def __init__(self, tla: 'TLA2528') -> None:
+        self._tla = tla
+        self._response_byte: int | None = None
+
+    def refresh(self):
+        response_bytes = self._tla.read_bytes(self.MANUAL_CH_SEL_ADDRESS)
+        self._response_byte = response_bytes[0]
 
     @property
     def manual_channel_id(self) -> int:
-        return self._response_byte & 0x0F
+        assert self._response_byte is not None
+        return self._response_byte & self.MANUAL_CH_ID_MASK
 
+    def set_manual_channel_id(self, channel_id: int):
+        assert channel_id >= 0 and channel_id < 8
+        assert self._response_byte is not None
+        print(bin(self._response_byte))
+        replaced = replace_bits(self._response_byte, channel_id, self.MANUAL_CH_ID_SIZE, self.MANUAL_CH_ID_OFFSET)
+        print(bin(replaced))
+        self._tla.write_byte(self.MANUAL_CH_SEL_ADDRESS, replaced)
 
 class TLA2528PinConfiguration:
     NUM_CHANNELS = 8
@@ -241,18 +271,31 @@ class TLA2528SystemStatus:
         return bool(result)
 class TLA2528:
 
+    READ_BYTE = 0b00010000
+    WRITE_BYTE = 0b00001000
     def __init__(self, i2c: I2C, device_addr: int) -> None:
         self._i2c = i2c
         self._device_addr = device_addr
 
-    def read_bytes(self, register_address: int, bytecount: int=1):
-        write_request = bytes([READ_BYTE, register_address])
-        i2c.writeto(device, write_request)
+    def read_bytes(self, register_address: int, bytecount: int=1) -> bytes:
+        read_request = bytes([self.READ_BYTE, register_address])
+        i2c.writeto(self._device_addr, read_request)
         read_bytes = i2c.readfrom(device, bytecount)
         if DEBUG_MODE:
-            print(f"write req: {bytes_to_bits(write_request)}")
+            print(f"read req: {bytes_to_bits(read_request)}")
             print(f"read bytes: {bytes_to_bits(read_bytes)}")
         return read_bytes
+    
+    def write_byte(self, register_address: int, write_byte: int):
+        write_request = bytes([self.WRITE_BYTE, register_address, write_byte])
+        i2c.writeto(self._device_addr, write_request)
+        if DEBUG_MODE:
+            print(f"write req: {bytes_to_bits(write_request)}")
+
+    def read_voltage(self) -> int:
+        read_bytes = i2c.readfrom(self._device_addr, 2)
+        voltage = adc_to_voltage(read_bytes, avdd=4.97)
+        return voltage
 
     def get_system_status(self) -> TLA2528SystemStatus:
         SYSTEM_STATUS_ADDRESS = 0x00
@@ -300,10 +343,10 @@ class TLA2528:
         return TLA2528GpiValue(read)
     
     def get_manual_channel_select(self) -> TLA2528ManualChannelSelect:
-        MANUAL_CH_SEL_ADDRESS = 0x11
-        read = self.read_bytes(MANUAL_CH_SEL_ADDRESS)
-        return TLA2528ManualChannelSelect(read)
-
+        manual_select = TLA2528ManualChannelSelect(self)
+        manual_select.refresh()
+        return manual_select
+    
     """
         def get_sequence_cfg(self) -> TLA2528SequenceCfg:
             SEQUENCE_CFG_ADDRESS = 0x10
@@ -338,19 +381,25 @@ while True:
         print("no devices found")
 # Send the System Status command to the TLA2528 chip and read the response byte
 chip = TLA2528(i2c, device)
+manual_select = chip.get_manual_channel_select()
+
 while True:
-    status = chip.get_system_status()
-    print(status)
-    conf = chip.get_general_configuration()
-    print(conf)
-    ovs = chip.get_oversampling_ratio_configuration()
-    print(ovs)
-    manual_select = chip.get_manual_channel_select()
+    """
+    manual_select.set_manual_channel_id(0)
     print(manual_select.manual_channel_id)
-    read_bytes = i2c.readfrom(device, 2)
-    print(bytes_to_bits(read_bytes))
-    v = adc_to_voltage(read_bytes, avdd=4.97)
-    print(f"voltage: {v}")
-    print('->')
+    print(f"voltage: {chip.read_voltage()}")
+
+    """
+    manual_select.set_manual_channel_id(0)
+    manual_select.refresh()
+    print(manual_select.manual_channel_id)
+    print(f"voltage[0]: {chip.read_voltage()}")
+
+    manual_select.set_manual_channel_id(1)
+    manual_select.refresh()
+    print(manual_select.manual_channel_id)
+    print(f"voltage[1]: {chip.read_voltage()}")
+
     pin.toggle()
-    sleep(0.1)
+    sleep(1)
+    print("----------")
