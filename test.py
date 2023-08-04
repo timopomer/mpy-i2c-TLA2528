@@ -1,6 +1,5 @@
-from machine import Pin, I2C
+from machine import Pin, I2C, UART
 from time import sleep, sleep_ms
-
 
 DEBUG_MODE = True
 
@@ -131,9 +130,7 @@ class TLA2528ManualChannelSelect:
     def set_manual_channel_id(self, channel_id: int):
         assert channel_id >= 0 and channel_id < 8
         assert self._response_byte is not None
-        print(bin(self._response_byte))
         replaced = replace_bits(self._response_byte, channel_id, self.MANUAL_CH_ID_SIZE, self.MANUAL_CH_ID_OFFSET)
-        print(bin(replaced))
         self._tla.write_byte(self.MANUAL_CH_SEL_ADDRESS, replaced)
 
 class TLA2528PinConfiguration:
@@ -346,23 +343,6 @@ class TLA2528:
         manual_select = TLA2528ManualChannelSelect(self)
         manual_select.refresh()
         return manual_select
-    
-    """
-        def get_sequence_cfg(self) -> TLA2528SequenceCfg:
-            SEQUENCE_CFG_ADDRESS = 0x10
-            read = self.read_bytes(SEQUENCE_CFG_ADDRESS)
-            return TLA2528SequenceCfg(read)
-
-        def get_channel_sel(self) -> TLA2528ChannelSel:
-            CHANNEL_SEL_ADDRESS = 0x11
-            read = self.read_bytes(CHANNEL_SEL_ADDRESS)
-            return TLA2528ChannelSel(read)
-
-        def get_auto_seq_ch_sel(self) -> TLA2528AutoSeqChSel:
-            AUTO_SEQ_CH_SEL_ADDRESS = 0x12
-            read = self.read_bytes(AUTO_SEQ_CH_SEL_ADDRESS)
-            return TLA2528AutoSeqChSel(read)
-    """
 
 
 pin = Pin("LED", Pin.OUT)
@@ -382,12 +362,20 @@ while True:
 # Send the System Status command to the TLA2528 chip and read the response byte
 chip = TLA2528(i2c, device)
 manual_select = chip.get_manual_channel_select()
-
+uart = UART(1, baudrate=9600)#,tx=Pin(4),rx=Pin(5))
 while True:
     """
-    manual_select.set_manual_channel_id(0)
-    print(manual_select.manual_channel_id)
-    print(f"voltage: {chip.read_voltage()}")
+    rxData=bytes()
+    uart_data = uart.readline()
+    if uart_data:
+        sentence = str(uart_data).strip("b'\\r\\n")
+        parsed_data = parse_nmea_sentence(sentence)
+        if parsed_data:
+            print(parsed_data)
+        else:
+            print(f"Unsupported sentence: {sentence}")
+    else:
+        sleep(0.1)  # If no data is available, wait for 100 ms before checking again
 
     """
     manual_select.set_manual_channel_id(0)
@@ -400,6 +388,12 @@ while True:
     print(manual_select.manual_channel_id)
     print(f"voltage[1]: {chip.read_voltage()}")
 
+    manual_select.set_manual_channel_id(2)
+    manual_select.refresh()
+    print(manual_select.manual_channel_id)
+    print(f"voltage[2]: {chip.read_voltage()}")
+
+
     pin.toggle()
-    sleep(1)
+    sleep(0.1)
     print("----------")
